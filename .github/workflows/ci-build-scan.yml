@@ -38,13 +38,13 @@ jobs:
     - name: Set up .NET Core
       uses: actions/setup-dotnet@v3
       with:
-      dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-version: ${{env.DOTNET_VERSION}}
 
     - name: Restore dependencies
       run: dotnet restore
 
     - name: Build
-      run: dotnet build --no-restore --configuration ${{ env.BUILD_CONFIGURATION }}
+      run: dotnet build --no-restore --configuration ${{env.BUILD_CONFIGURATION}}
 
     - name: Run CodeQL Analysis
       uses: github/codeql-action/analyze@v3
