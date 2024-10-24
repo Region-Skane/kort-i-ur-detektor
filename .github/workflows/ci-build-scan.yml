@@ -1,0 +1,51 @@
+name: 'Build & Scan Repo'
+
+permissions:
+  contents: read # This is required for actions/checkout
+  packages: read # This is required to enable read from private NuGet feed on GitHub Packages
+
+on:
+  push:
+    branches:
+    - main
+    paths-ignore:
+    - '**/*.md'
+  pull_request:
+    types: [opened, reopened, synchronize] 
+    branches:
+    - main  
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '6.0.x'
+  BUILD_CONFIGURATION: Release
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    name: Build & Scan
+    steps:
+      
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        queries: security-and-quality
+
+    - name: Set up .NET Core
+      uses: actions/setup-dotnet@v3
+      with:
+      dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build
+      run: dotnet build --no-restore --configuration ${{ env.BUILD_CONFIGURATION }}
+
+    - name: Run CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      

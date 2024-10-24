@@ -1,0 +1,73 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- Define the variables in "$(var.*) expressions" -->
+<?define Name = "KortIUrDetektor" ?>
+<?define Manufacturer = "RegionSkane" ?>
+<?define Version = "0.9.5" ?>
+<?define UpgradeCode = "9ED3FF33-8718-444E-B44B-69A2344B7E98" ?>
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package Name="$(Name)"
+             Manufacturer="$(Manufacturer)"
+             Version="$(Version)"
+             UpgradeCode="$(var.UpgradeCode)"
+             Compressed="true">
+
+        <!-- Allow upgrades and prevent downgrades -->
+        <MajorUpgrade DowngradeErrorMessage="A later version of [ProductName] is already installed. Setup will now exit." />
+
+        <!-- Define the directory structure -->
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+
+                <!-- Create a folder inside program files -->
+                <Directory Id="ROOTDIRECTORY" Name="$(Manufacturer)">
+
+                    <!-- Create a folder within the parent folder given the name -->
+                    <Directory Id="INSTALLFOLDER" Name="$(Name)" />
+                </Directory>
+            </Directory>
+        </Directory>
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- The files inside this DirectoryRef are linked to
+             the KortIUrDetektor directory via INSTALLFOLDER -->
+        <DirectoryRef Id="INSTALLFOLDER">
+
+            <!-- Create a single component which is the KortIUrDetektorApp.exe file -->
+            <Component Id="DetektorExecutable" Bitness="always64">
+
+                <!-- Copies the KortIUrDetektor.exe file using the
+                     project reference preprocessor variables -->
+                <File Id="KortIUrDetektor.exe"
+                      Source="$(var.KortIUrDetektor.TargetDir)publish\KortIUrDetektor.exe"
+                      KeyPath="true" />
+				<File Id="appsettings.json"
+                      Source="$(var.KortIUrDetektor.TargetDir)publish\appsettings.json"
+                      KeyPath="false" />
+
+                <!-- Remove all files from the INSTALLFOLDER on uninstall -->
+                <RemoveFile Id="ALLFILES" Name="*.*" On="both" />
+				
+            </Component>
+
+			<Component Id="ApplicationRunAtLogon" Guid="$(var.UpgradeCode)">
+				<RegistryValue Root="HKLM" Action="write" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="KortIUrDetektor" Value="[INSTALLFOLDER]KortIUrDetektor.exe" Type="string"/>
+			</Component>
+			
+        </DirectoryRef>
+
+        <!-- Tell WiX to install the files -->
+        <Feature Id="Application" Title="KortIUrDetektor Setup" Level="1">
+            <ComponentGroupRef Id="ProductComponents" />
+        </Feature>
+
+
+		<ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+			<ComponentRef Id="DetektorExecutable" />
+			<ComponentRef Id="ApplicationRunAtLogon" />
+		</ComponentGroup>
+
+
+    </Package>
+</Wix>

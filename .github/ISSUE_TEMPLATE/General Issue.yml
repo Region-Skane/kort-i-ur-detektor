@@ -1,0 +1,12 @@
+name: General Issue
+description: General Issue other than bug or feature
+
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the issue or question.
+      placeholder: 
+    validations:
+      required: true

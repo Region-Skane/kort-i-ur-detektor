@@ -1,0 +1,8 @@
+﻿<Project Sdk="WixToolset.Sdk/4.0.3">
+  <PropertyGroup>
+    <OutputName>KortIUrDetektor</OutputName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\KortIUrDetektorApp\KortIUrDetektor.csproj" />
+  </ItemGroup>
+</Project>
