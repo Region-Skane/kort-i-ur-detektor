@@ -8,7 +8,7 @@ Issues are very valuable to this project.
   - Bugs show where this project is lacking
   - With a question/discussion we help each other
 
-Thank you for creating them.
+Thank you for creating them!
 
 ## Pull Requests
 
