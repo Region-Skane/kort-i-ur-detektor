@@ -1,5 +1,9 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -8,30 +12,49 @@ using PCSC.Exceptions;
 using PCSC.Monitoring;
 using PCSC.Utils;
 using PCSC;
+using System.Management;
+using Microsoft.Win32;
+using System.Reflection.PortableExecutable;
+using System.Collections.Concurrent;
+using System.Reflection.Metadata;
+
 
 namespace KortIUrWork;
 class KortIUrDetektor
 {
-    private static bool isRunning = true;
+    private static bool _isRunning = true;
+    private static readonly object _isRunningLock = new object();
     public static ILogger<KortIUrDetektor> _logger;
     private readonly KortIUrConf config;
-    private IDeviceMonitor? deviceMonitor = null;
+    private IDeviceMonitor? _deviceMonitor = null;
     private ISCardMonitor? _monitor = null;
+    private static readonly object _monitorLock = new object();
+    IntPtr _powerRegistrationHandle;
+    IntPtr _pRecipient;
+    GCHandle _handleForThisClass;
     private string[]? _readerNames = null;
-    private bool[]? _cardExistInReader = { false };
-    private string _lastAttachedReader = String.Empty;
+    private ConcurrentDictionary<string, bool> _readersCardExists;
+    private ConcurrentDictionary<string, bool> _newlyAttachedReaders;
 
     public KortIUrDetektor(KortIUrConf config, LogLevel logLevel)
     {
         var loggerFactory = LoggerFactory.Create(
             builder => builder
-                        .AddEventLog(new Microsoft.Extensions.Logging.EventLog.EventLogSettings { SourceName = "KortIUrDetektor" })
+                        .AddEventLog(new Microsoft.Extensions.Logging.EventLog.EventLogSettings { SourceName = "Application" })
                         .SetMinimumLevel(logLevel)
         );
 
-        _logger = loggerFactory.CreateLogger<KortIUrDetektor>();
+        CreateLogger(loggerFactory.CreateLogger<KortIUrDetektor>());
+
         this.config = config;
+        _readersCardExists = new ConcurrentDictionary<string, bool>();
+        _newlyAttachedReaders = new ConcurrentDictionary<string, bool>();
         _logger.LogDebug("KortIUrDetektor constructor done");
+    }
+
+    private static void CreateLogger(ILogger<KortIUrDetektor> logger)
+    {
+        _logger = logger;
     }
 
     public void InitDetektor()
@@ -40,35 +63,16 @@ class KortIUrDetektor
         {
             _logger.LogInformation("KortIUrDetektor initiated at: {time} ", DateTimeOffset.Now);
 
-            deviceMonitor = DeviceMonitorFactory.Instance.Create(SCardScope.System);
+            RegisterForPowerEventNotifications();
 
-            // Start card monitoring here.
-            deviceMonitor.Initialized += OnInitialized;
-            deviceMonitor.StatusChanged += OnStatusChanged;
-            deviceMonitor.MonitorException += OnMonitorException;
+            StartMonitoring();
 
-            deviceMonitor.Start();
-
-            // Retrieve the names of all installed readers.
-            _readerNames = GetReaderNames();
-            if (IsEmpty(_readerNames))
-            {
-                _logger.LogDebug("There are currently no readers attached.");
-            }
-            else
-            {
-                InitializeCardReaderMonitor();
-                ShowUserInfo(_readerNames);
-                _cardExistInReader = new bool[_readerNames.Length];
-                _monitor?.Start(_readerNames);
-            }
-
-            _logger.LogInformation("KortIUrConf: KortUrCommandApp: {kortUrApp}, KortUrCommandAppArgs: {kortUrAppArgs}", config.KortUrCommandApp, config.KortUrCommandAppArgs);
-            _logger.LogInformation("KortIUrConf: KortICommandApp: {kortIApp}, KortICommandAppArgs: {kortIAppArgs}", config.KortICommandApp, config.KortICommandAppArgs);
+            _logger.LogInformation("KortIUrDetektor: KortIUrConf: KortUrCommandApp: {kortUrApp}, KortUrCommandAppArgs: {kortUrAppArgs}", config.KortUrCommandApp, config.KortUrCommandAppArgs);
+            _logger.LogInformation("KortIUrDetektor: KortIUrConf: KortICommandApp: {kortIApp}, KortICommandAppArgs: {kortIAppArgs}", config.KortICommandApp, config.KortICommandAppArgs);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Exception in StartAsync(): {Message}", ex.Message);
+            _logger.LogError(ex, "KortIUrDetektor: Exception in StartAsync(): {Message}", ex.Message);
         }
     }
 
@@ -76,48 +80,61 @@ class KortIUrDetektor
 
     public void CurrentDomain_ProcessExit(object sender, EventArgs e)
     {
-        // Handle the Cancel event
-        _logger.LogDebug("Cancel triggered. Starting shut down...");
-
-        // Set the flag to stop the background processing
-        isRunning = false;
-
-        // Shut down stuff and clean up
-
         try
         {
+            // Handle the Cancel event
+            _logger.LogInformation("KortIUrDetektor: Cancel triggered. Starting shut down...");
+
+            // Set the flag to stop the background processing
+            StopBackgroundProcessing();
+
+            // Shut down stuff and clean up
+
             var stopWatch = Stopwatch.StartNew();
 
-            _logger.LogInformation("KortIUrDetektor: Stop called at: {time}", DateTimeOffset.Now);
+            StopMonitoring();
 
-            ShutdownCardReaderMonitor();
-
-            if (deviceMonitor != null)
-            {
-                deviceMonitor.Initialized -= OnInitialized;
-                deviceMonitor.StatusChanged -= OnStatusChanged;
-                deviceMonitor.MonitorException -= OnMonitorException;
-            }
+            UnRegisterFromPowerEventNotifications();
 
             _logger.LogDebug("KortIUrDetektor took {ms} ms to stop.", stopWatch.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Exception in exit: {Message}", ex.Message);
+            _logger.LogError(ex, "KortIUrDetektor: Exception in exit: {Message}", ex.Message);
+        }
+    }
+
+    private static void StopBackgroundProcessing()
+    {
+        lock (_isRunningLock)
+        {
+            _isRunning = false;
         }
     }
 
     public void BackgroundTaskMethod()
     {
-        // Background processing logic goes here
-        _logger.LogDebug("Background processing started.");
-        while (isRunning)
+        try
         {
-            // some work
-            Thread.Sleep(2000);
-        }
+            // Background processing logic goes here
+            _logger.LogDebug("KortIUrDetektor: Background processing started.");
+            bool isRunning = true;
+            while (isRunning)
+            {
+                lock (_isRunningLock)
+                {
+                    isRunning = _isRunning;
+                }
+                // some work
+                Thread.Sleep(2000);
+            }
 
-        _logger.LogDebug("Background processing stopped.");
+            _logger.LogInformation("KortIUrDetektor: Background processing stopped.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "KortIUrDetektor: Exception in BackgroundTaskMethod(): {Message}", ex.Message);
+        }
     }
 
 
@@ -125,80 +142,88 @@ class KortIUrDetektor
 
     private void OnMonitorException(object sender, DeviceMonitorExceptionEventArgs args)
     {
-        _logger.LogInformation($"Exception in OnMonitorException: {args.Exception}");
+        try
+        {
+            _logger.LogInformation("KortIUrDetektor: Exception in OnMonitorException: {Ex}", args.Exception);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in OnMonitorException(): {Message}", ex.Message);
+        }
     }
 
     private void OnStatusChanged(object sender, DeviceChangeEventArgs e)
     {
-        _logger.LogDebug("OnStatusChange called");
         try
         {
+            _logger.LogDebug("KortIUrDetektor: OnStatusChange called");
+
             bool anyDetached = false;
             foreach (var removed in e.DetachedReaders)
             {
                 anyDetached = true;
-                var index = 0;
-                if (_readerNames != null) index = Array.IndexOf(_readerNames, removed);
-                if (index >= 0)
+                _logger.LogInformation("KortIUrDetektor: OnStatusChanged: Reader removed: {removed}", removed);
+
+                if (_readersCardExists.TryGetValue(removed, out bool cardPresent)  && cardPresent)
                 {
-                    if ((_cardExistInReader != null && _cardExistInReader.Length > 0) && _cardExistInReader[index])
-                    {
-                        _logger.LogInformation("OnStatusChanged: There was a card present in the reader which was removed -> CardRemoved event!");
-                        RunKortUrCommand();
-                        _cardExistInReader[index] = false;
-                    }
+                    _logger.LogInformation("KortIUrDetektor: OnStatusChanged: There was a card present in the reader which was removed -> CardRemoved event!");
+                    RunKortUrCommand();
                 }
+
+                _newlyAttachedReaders.TryRemove(removed, out _);
+                _readersCardExists.TryRemove(removed, out _);
             }
 
             bool anyAttached = false;
-            _lastAttachedReader = String.Empty;
             foreach (var added in e.AttachedReaders)
             {
-                _logger.LogDebug($"OnStatusChanged: New reader attached: {added}");
-                _lastAttachedReader = added;
+                _logger.LogInformation("KortIUrDetektor: OnStatusChanged: New reader attached: {added}", added);
+                if (!_newlyAttachedReaders.TryAdd(added, true))
+                {
+                    _newlyAttachedReaders[added] = true;
+                }
+
+                if (!_readersCardExists.TryAdd(added, false))
+                {
+                    _readersCardExists[added] = false;
+                }
+
                 anyAttached = true;
             }
 
             if (anyAttached || anyDetached)
             {
-                _monitor?.Cancel();
-                _readerNames = GetReaderNames();
-                if (IsEmpty(_readerNames))
-                {
-                    _cardExistInReader = new bool[0];
-                    ShutdownCardReaderMonitor();
-                }
-                else
-                {
-                    _cardExistInReader = new bool[_readerNames.Length];
-                    if (_monitor == null)
-                    {
-                        InitializeCardReaderMonitor();
-                    }
-                    _monitor?.Start(_readerNames);
-                }
+                _readerNames = e.AllReaders.ToArray();
+                RestartCardReaderMonitor(_readerNames);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception in OnStatusChanged(): {Message}", ex.Message);
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in OnStatusChanged(): {Message}", ex.Message);
         }
     }
 
     private void OnInitialized(object sender, DeviceChangeEventArgs e)
     {
-        _logger.LogDebug("OnInitialized called");
-        foreach (var name in e.AllReaders)
+        try
         {
-            _logger.LogDebug("OnInitialized: Connected reader: {Name}", name);
+            _logger.LogDebug("KortIUrDetektor: OnInitialized called");
+            foreach (var name in e.AllReaders)
+            {
+                _logger.LogDebug("KortIUrDetektor: OnInitialized: Connected reader: {Name}", name);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in OnInitialized(): {Message}", ex.Message);
         }
     }
 
-    private void ShowUserInfo(IEnumerable<string> readerNames)
+    private static void LogCardReaderNames(IEnumerable<string> readerNames)
     {
         foreach (var reader in readerNames)
         {
-            _logger.LogDebug($"Start monitoring reader: {reader}");
+            _logger.LogDebug("KortIUrDetektor: Start monitoring reader: {reader}", reader);
         }
     }
 
@@ -206,12 +231,43 @@ class KortIUrDetektor
     {
         try
         {
-            _monitor = MonitorFactory.Instance.Create(SCardScope.System);
-            AttachToAllEvents(_monitor);
+            lock (_monitorLock)
+            {
+                _monitor = MonitorFactory.Instance.Create(SCardScope.System);
+                AttachToAllEvents(_monitor);
+            }
         }
         catch (Exception exception)
         {
-            _logger.LogWarning("Exception in InitializeCardReaderMonitor: {Ex}", exception);
+            _logger.LogWarning("KortIUrDetektor: Exception in InitializeCardReaderMonitor: {Ex}", exception);
+        }
+    }
+
+    private void RestartCardReaderMonitor(string[] readerNames)
+    {
+        try
+        {
+            _logger.LogInformation("KortIUrDetektor: RestartCardReaderMonitor: due to attached or detached readers.");
+            lock (_monitorLock)
+            {
+                if (_monitor != null)
+                {
+                    _monitor?.Cancel();
+                    if (IsEmpty(readerNames))
+                    {
+                        _logger.LogDebug("KortIUrDetektor: RestartCardReaderMonitor: There are currently no readers attached.");
+                    }
+                    else
+                    {
+                        LogCardReaderNames(readerNames);
+                        _monitor?.Start(readerNames);
+                    }
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning("KortIUrDetektor: Exception in RestartCardReaderMonitor: {Ex}", exception);
         }
     }
 
@@ -219,23 +275,26 @@ class KortIUrDetektor
     {
         try
         {
-            if (_monitor != null)
+            lock (_monitorLock)
             {
-                _monitor.Cancel();
-                DetachFromAllEvents(_monitor);
-                _monitor.Dispose();
+                if (_monitor != null)
+                {
+                    _monitor.Cancel();
+                    DetachFromAllEvents(_monitor);
+                    _monitor.Dispose();
+                }
+                _monitor = null;
             }
-            _monitor = null;
         }
         catch (Exception exception)
         {
-            _logger.LogWarning("Exception in ShutdownCardReaderMonitor: {Ex}", exception);
+            _logger.LogWarning("KortIUrDetektor: Exception in ShutdownCardReaderMonitor: {Ex}", exception);
         }
     }
 
     private void AttachToAllEvents(ISCardMonitor monitor)
     {
-        _logger.LogDebug("AttachToAllEvents called");
+        _logger.LogDebug("KortIUrDetektor: AttachToAllEvents called");
         // Point the callback function(s) to the anonymous defined methods below.
         monitor.CardInserted += (sender, args) => DisplayCardInsertedEvent("CardInserted", args);
         monitor.CardRemoved += (sender, args) => DisplayCardRemovedEvent("CardRemoved", args);
@@ -245,7 +304,7 @@ class KortIUrDetektor
 
     private void DetachFromAllEvents(ISCardMonitor monitor)
     {
-        _logger.LogDebug("DetachFromAllEvents called");
+        _logger.LogDebug("KortIUrDetektor: DetachFromAllEvents called");
         // Point the callback function(s) to the anonymous defined methods below.
         monitor.CardInserted -= (sender, args) => DisplayCardInsertedEvent("CardInserted", args);
         monitor.CardRemoved -= (sender, args) => DisplayCardRemovedEvent("CardRemoved", args);
@@ -253,86 +312,147 @@ class KortIUrDetektor
         monitor.MonitorException -= MonitorException;
     }
 
-    private void DisplayCardInsertedEvent(string eventName, CardStatusEventArgs args)
+    private void StartMonitoring()
     {
-        _logger.LogInformation("DisplayCardInsertedEvent: Event: {EventName} , for reader: {ReaderName} , state: {State}", eventName, args.ReaderName, args.State);
         try
         {
-            RunKortICommand();
-            if (_readerNames != null && _cardExistInReader != null)
+            _logger.LogInformation("KortIUrDetektor: StartMonitoring called");
+            // Start card monitoring here.
+            _deviceMonitor = DeviceMonitorFactory.Instance.Create(SCardScope.System);
+            _deviceMonitor.Initialized += OnInitialized;
+            _deviceMonitor.StatusChanged += OnStatusChanged;
+            _deviceMonitor.MonitorException += OnMonitorException;
+
+            _deviceMonitor.Start();
+
+            _newlyAttachedReaders.Clear();
+            _readersCardExists.Clear();
+
+            InitializeCardReaderMonitor();
+
+            // Retrieve the names of all installed readers.
+            _readerNames = GetReaderNames();
+            if (IsEmpty(_readerNames))
             {
-                var index = Array.IndexOf(_readerNames, args.ReaderName);
-                if (index >= 0 && _cardExistInReader.Length > index)
+                _logger.LogDebug("KortIUrDetektor: There are currently no readers attached.");
+            }
+            else
+            {
+                _readersCardExists = new ConcurrentDictionary<string, bool>(_readerNames.ToDictionary(name => name, name => false));
+                LogCardReaderNames(_readersCardExists.Keys);
+                lock (_monitorLock)
                 {
-                    _cardExistInReader[index] = true;
+                    _monitor?.Start(_readerNames);
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception in DisplayCardInsertedEvent(): {Message}", ex.Message);
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in StartMonitoring(): {Message}", ex.Message);
+        }
+    }
+    private void StopMonitoring()
+    {
+        try
+        {
+            _logger.LogInformation("KortIUrDetektor: StopMonitoring called at: {time}", DateTimeOffset.Now);
+
+            ShutdownCardReaderMonitor();
+
+            if (_deviceMonitor != null)
+            {
+                _deviceMonitor.Initialized -= OnInitialized;
+                _deviceMonitor.StatusChanged -= OnStatusChanged;
+                _deviceMonitor.MonitorException -= OnMonitorException;
+                _deviceMonitor.Dispose();
+            }
+            _readerNames = null;
+
+            _newlyAttachedReaders.Clear();
+            _readersCardExists.Clear();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in StopMonitoring(): {Message}", ex.Message);
+        }
+    }
+
+    private void DisplayCardInsertedEvent(string eventName, CardStatusEventArgs args)
+    {
+        try
+        {
+            _logger.LogInformation("KortIUrDetektor: DisplayCardInsertedEvent: Event: {EventName} , for reader: {ReaderName} , state: {State}", eventName, args.ReaderName, args.State);
+
+            RunKortICommand();
+            _readersCardExists?.TryUpdate(args.ReaderName, true, false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in DisplayCardInsertedEvent(): {Message}", ex.Message);
         }
     }
 
     private void DisplayCardRemovedEvent(string eventName, CardStatusEventArgs args)
     {
-        _logger.LogInformation("DisplayCardRemovedEvent: Event: {EventName} , for reader: {ReaderName} , state: {State}", eventName, args.ReaderName, args.State);
         try
         {
+            _logger.LogInformation("KortIUrDetektor: DisplayCardRemovedEvent: Event: {EventName} , for reader: {ReaderName} , state: {State}", eventName, args.ReaderName, args.State);
+
             RunKortUrCommand();
-            if (_readerNames != null && _cardExistInReader != null)
-            {
-                var index = Array.IndexOf(_readerNames, args.ReaderName);
-                if (index >= 0 && _cardExistInReader.Length > index)
-                {
-                    _cardExistInReader[index] = false;
-                }
-            }
+            _readersCardExists?.TryUpdate(args.ReaderName, false, true);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception in DisplayCardRemovedEvent(): {Message}", ex.Message);
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in DisplayCardRemovedEvent(): {Message}", ex.Message);
         }
     }
 
     private void DisplayInitializedEvent(string eventName, CardStatusEventArgs args)
     {
-        _logger.LogInformation("DisplayInitializedEvent: Event: {EventName} , for reader: {ReaderName} , state: {State}", eventName, args.ReaderName, args.State);
-
         try
         {
-            if (((args.State & SCRState.Present) == SCRState.Present) && _lastAttachedReader == args.ReaderName)
+            _logger.LogInformation("KortIUrDetektor: DisplayInitializedEvent: Event: {EventName} , for reader: {ReaderName} , state: {State}", eventName, args.ReaderName, args.State);
+
+            if ((args.State & SCRState.Present) == SCRState.Present)
             {
-                _logger.LogInformation("DisplayInitializedEvent: reader initialized with card present in it -> CardInserted event!");
-                RunKortICommand();
-                if (_readerNames != null && _cardExistInReader != null)
+                if (_newlyAttachedReaders!= null && _newlyAttachedReaders.TryGetValue(args.ReaderName, out bool newlyAttached) && newlyAttached)
                 {
-                    var index = Array.IndexOf(_readerNames, args.ReaderName);
-                    if (index >= 0 && _cardExistInReader.Length > index)
-                    {
-                        _cardExistInReader[index] = true;
-                    }
+                    _logger.LogInformation("KortIUrDetektor: DisplayInitializedEvent: reader initialized with card present in it -> CardInserted event!");
+                    RunKortICommand();
                 }
+                
+                _readersCardExists?.TryUpdate(args.ReaderName, true, false);
             }
+            else
+            {
+                _readersCardExists?.TryUpdate(args.ReaderName, false, true);
+            }
+
+            _newlyAttachedReaders?.TryUpdate(args.ReaderName, false, true);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception in DisplayInitializedEvent(): {Message}", ex.Message);
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in DisplayInitializedEvent(): {Message}", ex.Message);
         }
     }
 
     private void MonitorException(object sender, PCSCException ex)
     {
-        _logger.LogInformation("MonitorException: Monitor exited due to an error: {ErrorText}", SCardHelper.StringifyError(ex.SCardError));
         try
         {
+            _logger.LogInformation("KortIUrDetektor: MonitorException: Monitor exited due to an error: {ErrorText}", SCardHelper.StringifyError(ex.SCardError));
+            
             _monitor?.Cancel();
-            _monitor = null;
         }
         catch (Exception exception)
         {
-            _logger.LogInformation("Exception when canceling _monitor:  {Ex}", exception);
+            _logger.LogInformation("KortIUrDetektor: Exception when canceling _monitor:  {Ex}", exception);
         }
+    }
+
+    private bool AnyCardExistsInAnyReader()
+    {
+        return _readersCardExists != null && _readersCardExists.Values.Any(x => x);
     }
 
     private static string[] GetReaderNames()
@@ -350,12 +470,12 @@ class KortIUrDetektor
             if (!string.IsNullOrEmpty(config.KortICommandApp))
             {
                 RunWindowsCmdCommand(config.KortICommandApp, config.KortICommandAppArgs);
-                _logger.LogInformation("RunKortICommand executed");
+                _logger.LogInformation("KortIUrDetektor: RunKortICommand executed");
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception in RunKortICommand(): {Message}", ex.Message);
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in RunKortICommand(): {Message}", ex.Message);
         }
     }
 
@@ -371,7 +491,7 @@ class KortIUrDetektor
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception in RunKortUrCommand(): {Message}", ex.Message);
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in RunKortUrCommand(): {Message}", ex.Message);
         }
     }
 
@@ -392,5 +512,130 @@ class KortIUrDetektor
             }
         };
         process.Start();
+    }
+
+    private void RegisterForPowerEventNotifications()
+    {
+        try
+        {
+            _handleForThisClass = GCHandle.Alloc(this);
+            _powerRegistrationHandle = new IntPtr();
+            DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS recipient = new DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS();
+            recipient.Callback = new DeviceNotifyCallbackRoutine(DeviceNotifyCallback);
+            recipient.Context = GCHandle.ToIntPtr(_handleForThisClass);
+
+            _pRecipient = Marshal.AllocHGlobal(Marshal.SizeOf(recipient));
+            Marshal.StructureToPtr(recipient, _pRecipient, false);
+
+            uint result = PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, ref recipient, ref _powerRegistrationHandle);
+
+            if (result != 0)
+                _logger.LogInformation("KortIUrDetektor: Error registering for power notifications: {err}", Marshal.GetLastWin32Error().ToString());
+            else
+                _logger.LogInformation("KortIUrDetektor: Successfully Registered for power notifications!");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in RegisterForPowerEventNotifications(): {Message}", ex.Message);
+        }
+    }
+
+    private void UnRegisterFromPowerEventNotifications()
+    {
+        try
+        {
+            uint result = PowerUnregisterSuspendResumeNotification(ref _powerRegistrationHandle);
+
+            if (_handleForThisClass.IsAllocated)
+            {
+                _handleForThisClass.Free();
+            }
+
+            Marshal.FreeHGlobal(_pRecipient);
+
+            if (result != 0)
+                _logger.LogInformation("KortIUrDetektor: Error unregistering from power notifications, result: {result}", result.ToString());
+            else
+                _logger.LogInformation("KortIUrDetektor: Successfully Unregistered from power notifications!");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in UnRegisterFromPowerEventNotifications(): {Message}", ex.Message);
+        }
+    }
+
+    private static int DeviceNotifyCallback(IntPtr context, int type, IntPtr setting)
+    {
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(context);
+
+            if (handle.Target == null)
+            {
+                return 0;
+            }
+
+            KortIUrDetektor instance = (KortIUrDetektor)handle.Target;
+
+            _logger.LogInformation("KortIUrDetektor: got device notify power event of type: {Type}", type.ToString());
+
+            switch (type)
+            {
+                case PBT_APMRESUMEAUTOMATIC:
+                    _logger.LogInformation("KortIUrDetektor: Operation is resuming automatically from a low-power state.");
+                    instance.StartMonitoring();
+                    break;
+                case PBT_APMSUSPEND:
+                    _logger.LogInformation("KortIUrDetektor: System is suspending operation.");
+                    if (instance.AnyCardExistsInAnyReader())
+                    {
+                        _logger.LogInformation("KortIUrDetektor: A card is present in a reader, running KortUrCommand");
+                        instance.RunKortUrCommand();
+                    }
+                    instance.StopMonitoring();
+                    break;
+                default:
+                    _logger.LogInformation("KortIUrDetektor: no action will be taken on this device notify power event (of type: {Type})", type.ToString());
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "KortIUrDetektor: Exception in DeviceNotifyCallback(): {Message}", ex.Message);
+        }
+
+        return 0;
+    }
+
+    [DllImport("Powrprof.dll", SetLastError = true)]
+    static extern uint PowerRegisterSuspendResumeNotification(uint flags, ref DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS receipient, ref IntPtr registrationHandle);
+    [DllImport("Powrprof.dll", SetLastError = true)]
+    static extern uint PowerUnregisterSuspendResumeNotification(ref IntPtr registrationHandle);
+
+    private const int WM_POWERBROADCAST = 536; // (0x218)
+    //private const int PBT_APMPOWERSTATUSCHANGE = 10; // (0xA) - Power status has changed.
+    private const int PBT_APMRESUMEAUTOMATIC = 18; // (0x12) - Operation is resuming automatically from a low-power state.This message is sent every time the system resumes.
+    //private const int PBT_APMRESUMESUSPEND = 7; // (0x7) - Operation is resuming from a low-power state.This message is sent after PBT_APMRESUMEAUTOMATIC if the resume is triggered by user input, such as pressing a key.
+    private const int PBT_APMSUSPEND = 4; // (0x4) - System is suspending operation.
+    //private const int PBT_POWERSETTINGCHANGE = 32787; // (0x8013) - A power setting change event has been received.
+    private const int DEVICE_NOTIFY_CALLBACK = 2;
+
+    /// <summary>
+    /// OS callback delegate definition
+    /// </summary>
+    /// <param name="context">The context for the callback</param>
+    /// <param name="type">The type of the callback...for power notifcation it's a PBT_ message</param>
+    /// <param name="setting">A structure related to the notification, depends on type parameter</param>
+    /// <returns></returns>
+    delegate int DeviceNotifyCallbackRoutine(IntPtr context, int type, IntPtr setting);
+
+    /// <summary>
+    /// A callback definition
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS
+    {
+        public DeviceNotifyCallbackRoutine Callback;
+        public IntPtr Context;
     }
 }

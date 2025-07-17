@@ -3,7 +3,7 @@
 <!-- Define the variables in "$(var.*) expressions" -->
 <?define Name = "KortIUrDetektor" ?>
 <?define Manufacturer = "RegionSkane" ?>
-<?define Version = "0.9.5" ?>
+<?define Version = "0.9.7" ?>
 <?define UpgradeCode = "9ED3FF33-8718-444E-B44B-69A2344B7E98" ?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">

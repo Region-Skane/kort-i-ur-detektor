@@ -22,7 +22,7 @@ Detta är en bakgrundsapplikation utan console som skall köra/starta så fort n
 ## Getting Started
 1. Installera Visual Studio
 1. Installera wix tools för att kunna bygga msi paket:
-	'dotnet tool install --global wix'
+	'dotnet tool install --global wix --version 4.0.6'
 1. Installera Visual Studio Extension som heter "HeatWave for VS2022 extension", ni hittar info om det här https://marketplace.visualstudio.com/items?itemName=FireGiant.FireGiantHeatWaveDev17 annars om Visual Studio inte hittar det när ni söker på det.
 
 
