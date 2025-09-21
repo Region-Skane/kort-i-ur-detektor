@@ -32,6 +32,7 @@ class KortIUrDetektor
     IntPtr _powerRegistrationHandle;
     IntPtr _pRecipient;
     GCHandle _handleForThisClass;
+    private DeviceNotifyCallbackRoutine? _powerCallback;
     private string[]? _readerNames = null;
     private ConcurrentDictionary<string, bool> _readersCardExists;
     private ConcurrentDictionary<string, bool> _newlyAttachedReaders;
@@ -365,6 +366,7 @@ class KortIUrDetektor
                 _deviceMonitor.StatusChanged -= OnStatusChanged;
                 _deviceMonitor.MonitorException -= OnMonitorException;
                 _deviceMonitor.Dispose();
+                _deviceMonitor = null;
             }
             _readerNames = null;
 
@@ -521,7 +523,8 @@ class KortIUrDetektor
             _handleForThisClass = GCHandle.Alloc(this);
             _powerRegistrationHandle = new IntPtr();
             DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS recipient = new DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS();
-            recipient.Callback = new DeviceNotifyCallbackRoutine(DeviceNotifyCallback);
+            _powerCallback = new DeviceNotifyCallbackRoutine(DeviceNotifyCallback);
+            recipient.Callback = _powerCallback;
             recipient.Context = GCHandle.ToIntPtr(_handleForThisClass);
 
             _pRecipient = Marshal.AllocHGlobal(Marshal.SizeOf(recipient));
@@ -561,6 +564,10 @@ class KortIUrDetektor
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "KortIUrDetektor: Exception in UnRegisterFromPowerEventNotifications(): {Message}", ex.Message);
+        }
+        finally
+        {
+            _powerCallback = null;
         }
     }
 
