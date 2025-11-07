@@ -1,15 +1,20 @@
 KortIUrDetektor is a background application that detects if a Smart Card is inserted or removed from any internal or attached smart card reader.
 When a card inserted event is detected then KortIUrDetektor try to execute a command with arguments (see appsettings.json file), default no command.
-When a card removed event is detected then KortIUrDetektor try to execute a command with arguments (see appsettings.json file), default the following command is execited "C:\\Program Files (x86)\\Citrix\\ICA Client\\SelfServicePlugin\\SelfService.exe" with the following arguments "-logoff -terminate", which in summary closes all ongoing citrix apps.
+When a card removed event is detected then KortIUrDetektor try to execute a command with arguments (see appsettings.json file), default the following command is execited "C:\\Program Files (x86)\\Citrix\\ICA Client\\SelfServicePlugin\\SelfService.exe" with the following arguments "-terminate", which in summary closes all ongoing citrix apps.
+A card removed event can happen in three scenarios:
+-When a card is removed from any connected reader (when a user is logged in and the computer is running normally)
+-When any connected reader is disconnected from the computer and if the reader had a card inserted before disconnected (when a user is logged in and the computer is running normally)
+-New in this release: If a card exists in any reader and the computer is suspending (going to sleep).
+
 KortIUrDetektor never reads the content of the card and it does not care which type of smart card it is.
 
 The windows installation file "KortIUrDetektor_x_y_z.msi", which is signed by Region Skåne, will install KortIUrDetektor.exe (also signed by Region Skåne) and appsettings.json in the following location: C:\Program Files\RegionSkane\KortIUrDetektor
 The installation will also make sure, by updating the windows registry, that the KortIUrDetektor.exe is started every time a user is logging into windows.
 It is possible to uninstall the app from programs menu, or upgrade the installation by simply running a newer installation file.
 
-The configuration in the appsettings.json file can be edited.
-Windows event log level can be changed between Warning, Information and Debug, but Warning is the default level so only warnings are logged. 
-The commands and arguments for card inserted event and card removed event can also be changed according to your needs.
+The configuration in the appsettings.json file can be edited. If this file is changed and saved (with admin rights) then KortIUrDetektor needs to be restarted for the new settings to take effect.
+-Windows event log level can be changed between Warning, Information and Debug, and Information is the default level. All logs will reside in Event Viewer (Loggboken) under Windows-Logs/Application (Windows-loggar/Program), search in source Application for "KortIUrDetektor:".  
+-The commands and arguments for card inserted event and card removed event can also be changed according to your needs.
 
 ---
 
