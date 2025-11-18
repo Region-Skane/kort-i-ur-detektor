@@ -83,21 +83,10 @@ class KortIUrDetektor
     {
         try
         {
-            // Handle the Cancel event
-            _logger.LogInformation("KortIUrDetektor: Cancel triggered. Starting shut down...");
+            _logger.LogInformation("KortIUrDetektor: ProcessExit triggered. Starting shut down...");
 
             // Set the flag to stop the background processing
             StopBackgroundProcessing();
-
-            // Shut down stuff and clean up
-
-            var stopWatch = Stopwatch.StartNew();
-
-            StopMonitoring();
-
-            UnRegisterFromPowerEventNotifications();
-
-            _logger.LogDebug("KortIUrDetektor took {ms} ms to stop.", stopWatch.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
@@ -113,28 +102,37 @@ class KortIUrDetektor
         }
     }
 
-    public void BackgroundTaskMethod()
+    public void BackgroundTaskMethod(CancellationToken cancellationToken = default)
     {
         try
         {
             // Background processing logic goes here
             _logger.LogDebug("KortIUrDetektor: Background processing started.");
             bool isRunning = true;
-            while (isRunning)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 lock (_isRunningLock)
                 {
                     isRunning = _isRunning;
+                    if (!isRunning) break;
                 }
                 // some work
-                Thread.Sleep(2000);
+                cancellationToken.WaitHandle.WaitOne(2000);
             }
-
+            StopMonitoring();
+            UnRegisterFromPowerEventNotifications();
             _logger.LogInformation("KortIUrDetektor: Background processing stopped.");
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("KortIUrDetektor: Background processing was cancelled.");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "KortIUrDetektor: Exception in BackgroundTaskMethod(): {Message}", ex.Message);
+            StopMonitoring();
+            UnRegisterFromPowerEventNotifications();
+            throw;
         }
     }
 
@@ -234,8 +232,15 @@ class KortIUrDetektor
         {
             lock (_monitorLock)
             {
-                _monitor = MonitorFactory.Instance.Create(SCardScope.System);
-                AttachToAllEvents(_monitor);
+                if (_monitor == null)
+                {
+                    _monitor = MonitorFactory.Instance.Create(SCardScope.System);
+                    AttachToAllEvents(_monitor);
+                }
+                else
+                {
+                    _logger.LogInformation("KortIUrDetektor: InitializeCardReaderMonitor: Monitor already initialized.");
+                }
             }
         }
         catch (Exception exception)
@@ -547,19 +552,22 @@ class KortIUrDetektor
     {
         try
         {
-            uint result = PowerUnregisterSuspendResumeNotification(ref _powerRegistrationHandle);
-
-            if (_handleForThisClass.IsAllocated)
+            if (_powerRegistrationHandle != IntPtr.Zero)
             {
-                _handleForThisClass.Free();
+                uint result = PowerUnregisterSuspendResumeNotification(ref _powerRegistrationHandle);
+
+                if (_handleForThisClass.IsAllocated)
+                {
+                    _handleForThisClass.Free();
+                }
+
+                Marshal.FreeHGlobal(_pRecipient);
+
+                if (result != 0)
+                    _logger.LogInformation("KortIUrDetektor: Error unregistering from power notifications, result: {result}", result.ToString());
+                else
+                    _logger.LogInformation("KortIUrDetektor: Successfully Unregistered from power notifications!");
             }
-
-            Marshal.FreeHGlobal(_pRecipient);
-
-            if (result != 0)
-                _logger.LogInformation("KortIUrDetektor: Error unregistering from power notifications, result: {result}", result.ToString());
-            else
-                _logger.LogInformation("KortIUrDetektor: Successfully Unregistered from power notifications!");
         }
         catch (Exception ex)
         {
@@ -568,6 +576,9 @@ class KortIUrDetektor
         finally
         {
             _powerCallback = null;
+            _powerRegistrationHandle = IntPtr.Zero;
+            _pRecipient = IntPtr.Zero;
+            _handleForThisClass = default;
         }
     }
 
