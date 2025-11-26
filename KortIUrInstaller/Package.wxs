@@ -3,7 +3,7 @@
 <!-- Define the variables in "$(var.*) expressions" -->
 <?define Name = "KortIUrDetektor" ?>
 <?define Manufacturer = "RegionSkane" ?>
-<?define Version = "0.9.8" ?>
+<?define Version = "0.9.9" ?>
 <?define UpgradeCode = "9ED3FF33-8718-444E-B44B-69A2344B7E98" ?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -17,17 +17,13 @@
         <MajorUpgrade DowngradeErrorMessage="A later version of [ProductName] is already installed. Setup will now exit." />
 
         <!-- Define the directory structure -->
-        <Directory Id="TARGETDIR" Name="SourceDir">
-            <Directory Id="ProgramFiles64Folder">
-
-                <!-- Create a folder inside program files -->
-                <Directory Id="ROOTDIRECTORY" Name="$(Manufacturer)">
-
-                    <!-- Create a folder within the parent folder given the name -->
-                    <Directory Id="INSTALLFOLDER" Name="$(Name)" />
-                </Directory>
-            </Directory>
-        </Directory>
+		<StandardDirectory Id="ProgramFiles64Folder">
+			<!-- Create a folder inside program files -->
+			<Directory Id="ROOTDIRECTORY" Name="$(Manufacturer)">
+				<!-- Create a folder within the parent folder given the name -->
+				<Directory Id="INSTALLFOLDER" Name="$(Name)" />
+			</Directory>
+		</StandardDirectory>
         <MediaTemplate EmbedCab="yes" />
 
         <!-- The files inside this DirectoryRef are linked to
